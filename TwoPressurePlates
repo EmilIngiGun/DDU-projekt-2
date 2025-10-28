@@ -1,6 +1,6 @@
 // ----- CONFIG -----
-const byte numSensors = 2;                    // number of pressure sensors
-const byte sensorPins[numSensors] = {A0, A1}; // analog input pins
+const byte numSensors = 2;                   // number of pressure sensors
+const byte sensorPins[numSensors] = {A2, A1}; // analog input pins
 
 // ----- FILTER AND THRESHOLD SETTINGS -----
 float filterAlpha = 16.0;
@@ -12,6 +12,8 @@ float movingThreshold[numSensors] = {440.0, 440.0};
 float minimumVal[numSensors] = {350.0, 350.0};
 float maximumVal[numSensors] = {450.0, 450.0};
 
+unsigned long loopCounter = 0;
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -19,26 +21,26 @@ void setup() {
 }
 
 void loop() {
+  // Update all sensors
   for (byte i = 0; i < numSensors; i++) {
     int val = analogRead(sensorPins[i]);
 
-    // Adaptive min/max tracking
+    // Update min/max adaptively
     if (val > maximumVal[i]) maximumVal[i] = val;
     if (val < minimumVal[i]) minimumVal[i] = val;
 
     // First-order filter (responsive)
     filtered[i] = (filtered[i] * filterAlpha + (float)val) / (filterAlpha + 1.0);
 
-    // Second-order moving threshold (lagging)
+    // Second-order moving threshold (slower)
     movingThreshold[i] =
       (movingThreshold[i] * filterAlpha * 32 + filtered[i] * 1.1) /
       (filterAlpha * 32 + 1.1);
 
-    // Drop threshold quickly if filtered falls below
     if (movingThreshold[i] > filtered[i] * 1.1)
-      movingThreshold[i] = filtered[i];
+      movingThreshold[i] = filtered[i]; // drop quickly
 
-    // Slowly auto-adjust bounds
+    // Slowly creep min/max toward new center
     if (maximumVal[i] > movingThreshold[i] + thresholdOffset[i] / 4)
       maximumVal[i] -= 0.01;
     if (minimumVal[i] < movingThreshold[i] - thresholdOffset[i] / 4)
@@ -46,20 +48,31 @@ void loop() {
   }
 
   // ----- SERIAL PLOTTER OUTPUT -----
-  // Only output the filtered and threshold per sensor
+  // Each variable name + value separated by spaces
   for (byte i = 0; i < numSensors; i++) {
     Serial.print("S");
+    Serial.print(i);
+    Serial.print("_Raw:");
+    Serial.print(analogRead(sensorPins[i]));
+    Serial.print(" S");
     Serial.print(i);
     Serial.print("_Filtered:");
     Serial.print(filtered[i]);
     Serial.print(" S");
     Serial.print(i);
-    Serial.print("_Threshold:");
+    Serial.print("_Thresh:");
     Serial.print(movingThreshold[i]);
-
+    Serial.print(" S");
+    Serial.print(i);
+    Serial.print("_Min:");
+    Serial.print(minimumVal[i]);
+    Serial.print(" S");
+    Serial.print(i);
+    Serial.print("_Max:");
+    Serial.print(maximumVal[i]);
     if (i < numSensors - 1) Serial.print(" ");
   }
+  Serial.println();
 
-  Serial.println(); // new line for the plotter
-  delay(10); // stable plotting
+  delay(10); // Small delay for stable plotting
 }
