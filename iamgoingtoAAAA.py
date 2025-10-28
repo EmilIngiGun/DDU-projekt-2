@@ -1,4 +1,4 @@
-# robust_tello_frontend.py
+# robust_tello_frontend_fixed.py
 from djitellopy import Tello
 import cv2
 import pygame
@@ -8,18 +8,21 @@ import serial
 import threading
 import sys
 
-# Config
-PORT = 'COM4'           # change to your Arduino port
+# ===== CONFIG =====
+PORT = 'COM6'           # your Arduino port
 BAUD_RATE = 115200
-SPEED_VALUE = 60        # velocity magnitude for key presses (-100..100)
+SPEED_VALUE = 60        # Tello velocity (-100..100)
 FPS = 60
 
-# How many times to attempt to get frames from djitellopy before fallback
 STREAM_RETRY = 4
-# How many seconds to wait after calling streamon()
 STREAM_START_WAIT = 2.0
-# Fallback: try opening UDP stream directly with OpenCV
 USE_UDP_FALLBACK = True
+# ===================
+
+# add near top of file, with other config
+AUTO_TAKEOFF = False    # safe default: require manual 'T' to take off
+CALIBRATE_SECONDS = 3   # how long to collect "idle" samples on startup
+
 
 class FrontEnd:
     def __init__(self):
@@ -29,65 +32,41 @@ class FrontEnd:
 
         self.tello = Tello()
 
-        # velocities (Tello expects ints -100..100)
+        # velocities
         self.for_back_velocity = 0
         self.left_right_velocity = 0
         self.up_down_velocity = 0
         self.yaw_velocity = 0
-        self.speed = 10  # set speed for Tello set_speed()
+        self.speed = 10
 
-        # whether we are actively sending rc control
+        # state flags
         self.send_rc_control = False
-
-        # timer event to call update at FPS
-        pygame.time.set_timer(pygame.USEREVENT + 1, 1000 // FPS)
-
-        # serial thread control
         self.serial_thread = None
         self.serial_running = False
-
-        # if we use a direct cv2 VideoCapture fallback
         self.udp_capture = None
         self.using_udp_fallback = False
 
-    def start_serial_thread(self):
-        """Start serial thread to read Arduino button presses."""
-        if self.serial_thread is not None and self.serial_thread.is_alive():
-            return
+        pygame.time.set_timer(pygame.USEREVENT + 1, 1000 // FPS)
 
-        self.serial_running = True
-        self.serial_thread = threading.Thread(target=self.read_serial, daemon=True)
-        self.serial_thread.start()
-
-    def stop_serial_thread(self):
-        self.serial_running = False
-        if self.serial_thread is not None:
-            self.serial_thread.join(timeout=0.5)
-
+    # ---------------- STREAM SETUP ---------------- #
     def try_start_stream(self):
-        """Try to start Tello stream and return a frame_read object or None."""
-        # Attempt to ensure clean stream state
         try:
             self.tello.streamoff()
         except Exception:
             pass
-
         try:
             self.tello.streamon()
         except Exception as e:
             print("streamon() failed:", e)
             return None
 
-        # wait a little for the drone to start streaming packets
         time.sleep(STREAM_START_WAIT)
-
         try:
             frame_read = self.tello.get_frame_read()
         except Exception as e:
             print("get_frame_read() raised:", e)
             return None
 
-        # Try a few times to see if frames arrive
         for attempt in range(STREAM_RETRY):
             if getattr(frame_read, "frame", None) is not None and getattr(frame_read, "frame", None).size > 0:
                 print("Frames received from djitellopy.")
@@ -98,15 +77,11 @@ class FrontEnd:
         return None
 
     def open_udp_fallback(self):
-        """Try to open the UDP stream directly with OpenCV cv2.VideoCapture."""
         print("Attempting UDP fallback (cv2.VideoCapture)...")
-        # If another program is using port 11111 this will fail.
-        # On Windows the protocol string is: 'udp://0.0.0.0:11111'
         cap = cv2.VideoCapture("udp://0.0.0.0:11111", cv2.CAP_FFMPEG)
         if not cap.isOpened():
             print("UDP fallback: VideoCapture couldn't open udp://0.0.0.0:11111")
             return None
-        # Try reading a few frames
         for i in range(30):
             ret, frame = cap.read()
             if ret and frame is not None and getattr(frame, "size", 0) > 0:
@@ -119,20 +94,29 @@ class FrontEnd:
         cap.release()
         return None
 
+    # ---------------- SERIAL THREAD ---------------- #
+    def start_serial_thread(self):
+        if self.serial_thread is not None and self.serial_thread.is_alive():
+            return
+        self.serial_running = True
+        self.serial_thread = threading.Thread(target=self.read_serial, daemon=True)
+        self.serial_thread.start()
+
+    def stop_serial_thread(self):
+        self.serial_running = False
+        if self.serial_thread is not None:
+            self.serial_thread.join(timeout=0.5)
+
+    # ---------------- MAIN LOOP ---------------- #
     def run(self):
-        """Main loop: connect to Tello, start video, start serial thread, handle events."""
         frame_read = None
         try:
             print("Connecting to Tello...")
             self.tello.connect()
             self.tello.set_speed(self.speed)
 
-            # Try djitellopy stream first (robustly)
             frame_read = self.try_start_stream()
-
-            # If djitellopy failed to provide frames, attempt UDP fallback
             if frame_read is None and USE_UDP_FALLBACK:
-                # sometimes another streamoff/streamon helps — try a couple of times
                 for attempt in range(2):
                     print(f"Stream attempt fallback loop {attempt + 1}/2")
                     frame_read = self.try_start_stream()
@@ -141,27 +125,17 @@ class FrontEnd:
                 if frame_read is None:
                     udp_cap = self.open_udp_fallback()
                     if udp_cap is None:
-                        # final failure: provide actionable diagnostics then raise
-                        print("\n=== VIDEO STREAM DIAGNOSTICS ===")
-                        print("1) Ensure your PC is connected to the Tello Wi-Fi (SSID like 'TELLO-XXXXXX').")
-                        print("2) Run: ping 192.168.10.1  (should respond).")
-                        print("3) Disable firewall/antivirus briefly or allow Python/port 11111 UDP.")
-                        print("4) Close apps that might use port 11111 (e.g. other VideoCapture/ffplay).")
-                        print("5) Try `ffplay udp://0.0.0.0:11111` while connected to Tello Wi-Fi to check raw stream.")
-                        print("6) Upgrade djitellopy: pip install -U djitellopy")
-                        print("================================\n")
-                        raise RuntimeError("Failed to grab video frames from video stream (both djitellopy and UDP fallback).")
+                        print("Video stream failed entirely.")
+                        raise RuntimeError("Failed to get video frames.")
             else:
                 print("Using djitellopy frame_read.")
 
-            # start serial reader thread (non-blocking)
             self.start_serial_thread()
-
             should_stop = False
+
             while not should_stop:
                 for event in pygame.event.get():
                     if event.type == pygame.USEREVENT + 1:
-                        # timer-based update
                         self.update()
                     elif event.type == pygame.QUIT:
                         should_stop = True
@@ -173,26 +147,19 @@ class FrontEnd:
                     elif event.type == pygame.KEYUP:
                         self.keyup(event.key)
 
-                # If using djitellopy frame_read:
                 if not self.using_udp_fallback:
                     if frame_read.stopped:
                         print("Frame read stopped.")
                         break
                     frame = frame_read.frame
                 else:
-                    # using UDP fallback VideoCapture
                     if self.udp_capture is None:
-                        print("UDP capture missing.")
                         break
                     ret, frame = self.udp_capture.read()
-                    if not ret or frame is None or getattr(frame, "size", 0) == 0:
-                        # show a black frame and continue; don't crash immediately
-                        print("UDP capture read failed for one frame.")
+                    if not ret or frame is None:
                         frame = np.zeros((720, 960, 3), dtype=np.uint8)
 
-                self.screen.fill([0, 0, 0])
-
-                # show battery
+                # Display battery level
                 try:
                     battery = self.tello.get_battery()
                 except Exception:
@@ -202,10 +169,9 @@ class FrontEnd:
                     cv2.putText(frame, text, (5, 720 - 5),
                                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                 except Exception:
-                    # if frame shape doesn't match expected, skip text
                     pass
 
-                # convert & display (only if frame has at least two dims)
+                # Display frame
                 if frame is not None and getattr(frame, "ndim", 0) >= 2:
                     try:
                         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -213,17 +179,13 @@ class FrontEnd:
                         frame = np.flipud(frame)
                         surf = pygame.surfarray.make_surface(frame)
                         self.screen.blit(surf, (0, 0))
-                    except Exception as e:
-                        # if conversion fails just display a blank panel
-                        print("Frame conversion/display error:", e)
+                    except Exception:
                         self.screen.fill([0, 0, 0])
                 pygame.display.update()
-
                 time.sleep(1.0 / FPS)
 
         except Exception as e:
             print("Exception in run():", e)
-            # do not sys.exit here so you can see the traceback in PyCharm
         finally:
             print("Shutting down...")
             self.stop_serial_thread()
@@ -241,33 +203,32 @@ class FrontEnd:
                 except Exception:
                     pass
             pygame.quit()
-            # don't call sys.exit so PyCharm doesn't kill the console unexpectedly
 
+    # ---------------- KEYBOARD HANDLING ---------------- #
     def keydown(self, key):
-        """Handle key down (single arg)."""
-        if key == pygame.K_UP:           # forward
+        if key == pygame.K_UP:
             self.for_back_velocity = SPEED_VALUE
-        elif key == pygame.K_DOWN:       # backward
+        elif key == pygame.K_DOWN:
             self.for_back_velocity = -SPEED_VALUE
-        elif key == pygame.K_LEFT:       # left
+        elif key == pygame.K_LEFT:
             self.left_right_velocity = -SPEED_VALUE
-        elif key == pygame.K_RIGHT:      # right
+        elif key == pygame.K_RIGHT:
             self.left_right_velocity = SPEED_VALUE
-        elif key == pygame.K_w:          # up
+        elif key == pygame.K_w:
             self.up_down_velocity = SPEED_VALUE
-        elif key == pygame.K_s:          # down
+        elif key == pygame.K_s:
             self.up_down_velocity = -SPEED_VALUE
-        elif key == pygame.K_a:          # yaw left
+        elif key == pygame.K_a:
             self.yaw_velocity = -SPEED_VALUE
-        elif key == pygame.K_d:          # yaw right
+        elif key == pygame.K_d:
             self.yaw_velocity = SPEED_VALUE
-        elif key == pygame.K_t:          # takeoff
+        elif key == pygame.K_t:
             try:
                 self.tello.takeoff()
                 self.send_rc_control = True
             except Exception as e:
                 print("Takeoff failed:", e)
-        elif key == pygame.K_l:          # land
+        elif key == pygame.K_l:
             try:
                 self.tello.land()
             except Exception as e:
@@ -275,7 +236,6 @@ class FrontEnd:
             self.send_rc_control = False
 
     def keyup(self, key):
-        """Handle key release (single arg)."""
         if key in (pygame.K_UP, pygame.K_DOWN):
             self.for_back_velocity = 0
         elif key in (pygame.K_LEFT, pygame.K_RIGHT):
@@ -285,71 +245,134 @@ class FrontEnd:
         elif key in (pygame.K_a, pygame.K_d):
             self.yaw_velocity = 0
 
+    # ---------------- SERIAL INPUT ---------------- #
     def read_serial(self):
-        """Read continuous sensor data from Arduino and detect press/release."""
+        """
+        Robust serial reader with startup calibration and safe auto-takeoff toggle.
+
+        Behavior:
+         - Collects CALIBRATE_SECONDS of samples at start to establish baseline.
+         - Waits until the rolling window is full before making decisions.
+         - Uses adaptive baseline (slowly drifts) but only after calibration.
+         - Will NOT auto-takeoff unless AUTO_TAKEOFF is True (safe default).
+        """
+        import statistics
         try:
             arduino = serial.Serial(PORT, BAUD_RATE, timeout=1)
-            time.sleep(2)  # allow Arduino to reset
+            time.sleep(2)
             print(f"✅ Connected to {PORT} at {BAUD_RATE} baud")
         except serial.SerialException as e:
             print("Could not open serial port:", e)
             return
 
         try:
-            pressing = False
-            threshold = 410  # adjust based on your Filtered_ADC range
-            hysteresis = 10  # helps avoid jitter (so release happens below 400)
-            last_value = 0
+            # Parameters to tune
+            window_size = 30  # samples for rolling average (increase to smooth more)
+            offset = 20  # how far above baseline counts as a press
+            hysteresis = 12  # avoid flicker on threshold edges
+            adapt_rate = 0.995  # baseline = baseline*adapt_rate + avg*(1-adapt_rate)
+            calibration_time = CALIBRATE_SECONDS  # seconds to sample baseline at start
 
+            values = []
+            baseline = None
+            pressing = False
+            last_value = None
+
+            # ---------------- Startup calibration ----------------
+            print(f"📏 Calibrating baseline for {calibration_time} s. Keep the plate untouched.")
+            calib_deadline = time.time() + calibration_time
+            while time.time() < calib_deadline:
+                line = arduino.readline().decode('utf-8', errors='ignore').strip()
+                if not line:
+                    time.sleep(0.01)
+                    continue
+                if "Filtered_ADC" not in line:
+                    continue
+                try:
+                    for p in line.split(','):
+                        if "Filtered_ADC" in p:
+                            v = float(p.split(':')[1])
+                            values.append(v)
+                            break
+                except Exception:
+                    continue
+                # keep sampling quickly
+            if len(values) == 0:
+                print("⚠️ Calibration failed: no samples. Falling back to 200.")
+                baseline = 200.0
+                values = [baseline] * window_size
+            else:
+                # initialize rolling window with recent samples, and baseline to mean
+                # pad with the mean so avg is stable immediately
+                mean_cal = float(sum(values) / len(values))
+                values = [mean_cal] * min(window_size, len(values))  # start with stable window
+                baseline = mean_cal
+            print(
+                f"📏 Calibration done. baseline={baseline:.2f}. Starting live read (offset={offset}, hyst={hysteresis}).")
+
+            # ---------------- Continuous loop ----------------
             while self.serial_running:
                 try:
                     line = arduino.readline().decode('utf-8', errors='ignore').strip()
                 except Exception:
                     line = ""
-
                 if not line:
                     time.sleep(0.01)
                     continue
-
-                # Example line:
-                # Raw_ADC:423,Filtered_ADC_(1st-order-filter):413.16,movingThreshold_(2nd-order-filter):392.34,...
                 if "Filtered_ADC" not in line:
                     continue
 
                 try:
-                    parts = line.split(',')
-                    for p in parts:
+                    for p in line.split(','):
                         if "Filtered_ADC" in p:
-                            value = float(p.split(':')[1])
-                            last_value = value
+                            last_value = float(p.split(':')[1])
                             break
                     else:
                         continue
                 except Exception:
                     continue
 
-                # Print value for debugging
-                print(f"[ADC] {last_value:.2f}")
+                # update rolling window
+                values.append(last_value)
+                if len(values) > window_size:
+                    values.pop(0)
+                if len(values) < window_size:
+                    # wait until window is full for reliable avg
+                    avg_value = float(sum(values) / len(values))
+                else:
+                    avg_value = float(sum(values) / len(values))
 
-                # === Button press logic ===
-                if not pressing and last_value > threshold:
-                    pressing = True
-                    print("🔵 PRESS detected — move forward")
-                    # Auto-takeoff if not flying
-                    if not self.send_rc_control:
-                        try:
-                            self.tello.takeoff()
-                            time.sleep(2)
-                            self.send_rc_control = True
-                        except Exception as e:
-                            print("Auto takeoff failed:", e)
-                    self.keydown(pygame.K_UP)
+                # slowly adapt baseline toward avg_value (very slow)
+                baseline = baseline * adapt_rate + avg_value * (1.0 - adapt_rate)
+                threshold = baseline + offset
 
-                elif pressing and last_value < (threshold - hysteresis):
-                    pressing = False
-                    print("⚪ RELEASE detected — stop")
-                    self.keyup(pygame.K_UP)
+                # debug line (keeps console readable)
+                print(
+                    f"[ADC] raw:{last_value:.1f} avg:{avg_value:.1f} base:{baseline:.1f} thr:{threshold:.1f} press={pressing}")
 
+                # Decision: require window full to change pressing state (optional safety)
+                if len(values) >= window_size:
+                    if not pressing and avg_value > threshold:
+                        pressing = True
+                        print("🔵 PRESS detected — will move forward")
+                        # Only auto-takeoff if enabled; otherwise rely on manual T key
+                        if not self.send_rc_control and AUTO_TAKEOFF:
+                            try:
+                                print("Taking off (AUTO_TAKEOFF enabled)...")
+                                self.tello.takeoff()
+                                time.sleep(2)
+                                self.send_rc_control = True
+                            except Exception as e:
+                                print("Auto takeoff failed:", e)
+                        # set velocity variable (actual send happens in update())
+                        self.for_back_velocity = SPEED_VALUE
+
+                    elif pressing and avg_value < (threshold - hysteresis):
+                        pressing = False
+                        print("⚪ RELEASE detected — stop")
+                        self.for_back_velocity = 0
+
+            # loop end
         except Exception as e:
             print("Serial reader error:", e)
         finally:
@@ -357,11 +380,10 @@ class FrontEnd:
                 arduino.close()
                 print("Serial port closed.")
 
+    # ---------------- UPDATE LOOP ---------------- #
     def update(self):
-        """Send velocities to Tello at regular intervals."""
         if self.send_rc_control:
             try:
-                # djitellopy: send_rc_control(left_right, forward_back, up_down, yaw)
                 self.tello.send_rc_control(
                     int(self.left_right_velocity),
                     int(self.for_back_velocity),
@@ -371,9 +393,11 @@ class FrontEnd:
             except Exception as e:
                 print("Failed to send rc control:", e)
 
+
 def main():
     frontend = FrontEnd()
     frontend.run()
+
 
 if __name__ == '__main__':
     main()
