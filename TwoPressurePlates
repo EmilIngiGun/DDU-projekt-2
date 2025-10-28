@@ -1,0 +1,65 @@
+// ----- CONFIG -----
+const byte numSensors = 2;                    // number of pressure sensors
+const byte sensorPins[numSensors] = {A0, A1}; // analog input pins
+
+// ----- FILTER AND THRESHOLD SETTINGS -----
+float filterAlpha = 16.0;
+float thresholdOffset[numSensors] = {50.0, 50.0}; // can be tuned per sensor
+
+// ----- PER-SENSOR STATE -----
+float filtered[numSensors] = {390.0, 390.0};
+float movingThreshold[numSensors] = {440.0, 440.0};
+float minimumVal[numSensors] = {350.0, 350.0};
+float maximumVal[numSensors] = {450.0, 450.0};
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("Starting multi-sensor pressure plot...");
+}
+
+void loop() {
+  for (byte i = 0; i < numSensors; i++) {
+    int val = analogRead(sensorPins[i]);
+
+    // Adaptive min/max tracking
+    if (val > maximumVal[i]) maximumVal[i] = val;
+    if (val < minimumVal[i]) minimumVal[i] = val;
+
+    // First-order filter (responsive)
+    filtered[i] = (filtered[i] * filterAlpha + (float)val) / (filterAlpha + 1.0);
+
+    // Second-order moving threshold (lagging)
+    movingThreshold[i] =
+      (movingThreshold[i] * filterAlpha * 32 + filtered[i] * 1.1) /
+      (filterAlpha * 32 + 1.1);
+
+    // Drop threshold quickly if filtered falls below
+    if (movingThreshold[i] > filtered[i] * 1.1)
+      movingThreshold[i] = filtered[i];
+
+    // Slowly auto-adjust bounds
+    if (maximumVal[i] > movingThreshold[i] + thresholdOffset[i] / 4)
+      maximumVal[i] -= 0.01;
+    if (minimumVal[i] < movingThreshold[i] - thresholdOffset[i] / 4)
+      minimumVal[i] += 0.01;
+  }
+
+  // ----- SERIAL PLOTTER OUTPUT -----
+  // Only output the filtered and threshold per sensor
+  for (byte i = 0; i < numSensors; i++) {
+    Serial.print("S");
+    Serial.print(i);
+    Serial.print("_Filtered:");
+    Serial.print(filtered[i]);
+    Serial.print(" S");
+    Serial.print(i);
+    Serial.print("_Threshold:");
+    Serial.print(movingThreshold[i]);
+
+    if (i < numSensors - 1) Serial.print(" ");
+  }
+
+  Serial.println(); // new line for the plotter
+  delay(10); // stable plotting
+}
