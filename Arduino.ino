@@ -1,16 +1,17 @@
 // ----- CONFIG -----
 const byte numSensors = 8;                   // number of pressure sensors
-const byte sensorPins[numSensors] = {A0, A1, A2, A3, A4, A5, A6, A7, A8}; // analog input pins
+const byte sensorPins[numSensors] = {A0, A1, A2, A3, A5, A10, A12, A14}; // analog input pins
 
 // ----- FILTER AND THRESHOLD SETTINGS -----
 float filterAlpha = 16.0;
-float thresholdOffset[numSensors] = {50.0, 50.0}; // can be tuned per sensor
+float thresholdOffset[numSensors] = {50.0, 50.0, 50.0, 50.0, 50.0, 50.0, 50.0, 50.0}; // can be tuned per sensor
 
 // ----- PER-SENSOR STATE -----
-float filtered[numSensors] = {390.0, 390.0};
-float movingThreshold[numSensors] = {440.0, 800.0};
-float minimumVal[numSensors] = {350.0, 700.0};
-float maximumVal[numSensors] = {450.0, 1000.0};
+float filtered[numSensors] = {372.0, 500.0, 370.0, 820.0, 260.0, 850.0, 550.0, 735.0};
+//float movingThreshold[numSensors] = {372.0, 500.0, 370.0, 820.0, 260.0, 850.0, 550.0, 735.0};
+float movingThreshold[numSensors] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+float minimumVal[numSensors] = {362.0, 480.0, 350.0, 800.0, 240.0, 830.0, 530.0, 715.0};
+float maximumVal[numSensors] = {415.0, 690.0, 700.0, 960.0, 400.0, 966.0, 730.0, 960.0};
 
 unsigned long loopCounter = 0;
 
@@ -53,9 +54,10 @@ void loop() {
     Serial.print("S");
     Serial.print(i);
     Serial.print("_speed:");
-    Serial.print((filtered[i]-minimumVal[i])/(maximumVal[i]-minimumVal[i]));
-    
+//    Serial.print((filtered[i]-minimumVal[i])/(maximumVal[i]-minimumVal[i]));
+  Serial.print(filtered[i]);  
     Serial.print(" S");
+    /*
     Serial.print(i);
     Serial.print("_min:");
     Serial.print(0);
@@ -64,10 +66,12 @@ void loop() {
     Serial.print(i);
     Serial.print("_max:");
     Serial.print(1);
+  */
     if (i < numSensors - 1) Serial.print(" ");
     
 
   }
+
   Serial.println();
 
   delay(10); // Small delay for stable plotting
