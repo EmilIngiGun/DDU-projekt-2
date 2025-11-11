@@ -1,6 +1,6 @@
 // ----- CONFIG -----
-const byte numSensors = 2;                   // number of pressure sensors
-const byte sensorPins[numSensors] = {A2, A1}; // analog input pins
+const byte numSensors = 8;                   // number of pressure sensors
+const byte sensorPins[numSensors] = {A0, A1, A2, A3, A4, A5, A6, A7, A8}; // analog input pins
 
 // ----- FILTER AND THRESHOLD SETTINGS -----
 float filterAlpha = 16.0;

@@ -248,15 +248,10 @@ class FrontEnd:
     # ---------------- SERIAL INPUT ---------------- #
     def read_serial(self):
         """
-        Robust serial reader with startup calibration and safe auto-takeoff toggle.
-
-        Behavior:
-         - Collects CALIBRATE_SECONDS of samples at start to establish baseline.
-         - Waits until the rolling window is full before making decisions.
-         - Uses adaptive baseline (slowly drifts) but only after calibration.
-         - Will NOT auto-takeoff unless AUTO_TAKEOFF is True (safe default).
+        Reads multiple pressure sensor speeds from Arduino and maps them to Tello axes.
+        Expected input lines (example):
+          S0_speed:0.23 S1_speed:0.12 S2_speed:0.05 S3_speed:0.00 ...
         """
-        import statistics
         try:
             arduino = serial.Serial(PORT, BAUD_RATE, timeout=1)
             time.sleep(2)
@@ -265,120 +260,69 @@ class FrontEnd:
             print("Could not open serial port:", e)
             return
 
-        try:
-            # Parameters to tune
-            window_size = 30  # samples for rolling average (increase to smooth more)
-            offset = 20  # how far above baseline counts as a press
-            hysteresis = 12  # avoid flicker on threshold edges
-            adapt_rate = 0.995  # baseline = baseline*adapt_rate + avg*(1-adapt_rate)
-            calibration_time = CALIBRATE_SECONDS  # seconds to sample baseline at start
+        num_sensors = 9  # up to 9 sensors supported
+        smoothed = [0.0] * num_sensors
+        alpha = 0.3  # smoothing factor (0=no smoothing, 1=noisy)
+        press_threshold = 0.1  # ignore tiny values below this
 
-            values = []
-            baseline = None
-            pressing = False
-            last_value = None
-
-            # ---------------- Startup calibration ----------------
-            print(f"📏 Calibrating baseline for {calibration_time} s. Keep the plate untouched.")
-            calib_deadline = time.time() + calibration_time
-            while time.time() < calib_deadline:
+        while self.serial_running:
+            try:
                 line = arduino.readline().decode('utf-8', errors='ignore').strip()
-                if not line:
-                    time.sleep(0.01)
-                    continue
-                if "Filtered_ADC" not in line:
-                    continue
-                try:
-                    for p in line.split(','):
-                        if "Filtered_ADC" in p:
-                            v = float(p.split(':')[1])
-                            values.append(v)
-                            break
-                except Exception:
-                    continue
-                # keep sampling quickly
-            if len(values) == 0:
-                print("⚠️ Calibration failed: no samples. Falling back to 200.")
-                baseline = 200.0
-                values = [baseline] * window_size
-            else:
-                # initialize rolling window with recent samples, and baseline to mean
-                # pad with the mean so avg is stable immediately
-                mean_cal = float(sum(values) / len(values))
-                values = [mean_cal] * min(window_size, len(values))  # start with stable window
-                baseline = mean_cal
+            except Exception:
+                continue
+            if not line:
+                continue
+
+            # Parse all sensor values in the line
+            try:
+                parts = line.split()
+                for p in parts:
+                    if "_speed:" in p:
+                        label, val = p.split(":")
+                        idx = int(label[1])  # 'S0_speed' -> 0
+                        if 0 <= idx < num_sensors:
+                            smoothed[idx] = (1 - alpha) * smoothed[idx] + alpha * float(val)
+            except Exception:
+                continue
+
+            # Optional: print for debugging
+            vals = " ".join([f"{v:.2f}" for v in smoothed])
+            print(f"[SENSORS] {vals}")
+
+            # Map sensors to movement axes
+            forward = smoothed[0] - smoothed[1]  # S0 forward, S1 backward
+            right = smoothed[2] - smoothed[3]  # S2 right, S3 left
+            yaw = smoothed[4] - smoothed[5]  # S4 rotate right, S5 rotate left
+            up = smoothed[6] - smoothed[7]  # S6 up, S7 down
+
+            # (S8 reserved if you add another behavior)
+
+            # Convert normalized (0–1) to -SPEED_VALUE..SPEED_VALUE
+            def scale(v):
+                if abs(v) < press_threshold:
+                    return 0
+                return int(np.clip(v, -1, 1) * SPEED_VALUE)
+
+            self.for_back_velocity = scale(forward)
+            self.left_right_velocity = scale(right)
+            self.yaw_velocity = scale(yaw)
+            self.up_down_velocity = scale(up)
+
+            # Debug output of velocities
             print(
-                f"📏 Calibration done. baseline={baseline:.2f}. Starting live read (offset={offset}, hyst={hysteresis}).")
+                f"[RC] FB:{self.for_back_velocity} LR:{self.left_right_velocity} "
+                f"UP:{self.up_down_velocity} YAW:{self.yaw_velocity}"
+            )
 
-            # ---------------- Continuous loop ----------------
-            while self.serial_running:
-                try:
-                    line = arduino.readline().decode('utf-8', errors='ignore').strip()
-                except Exception:
-                    line = ""
-                if not line:
-                    time.sleep(0.01)
-                    continue
-                if "Filtered_ADC" not in line:
-                    continue
+            time.sleep(0.02)  # ~50 Hz loop
 
-                try:
-                    for p in line.split(','):
-                        if "Filtered_ADC" in p:
-                            last_value = float(p.split(':')[1])
-                            break
-                    else:
-                        continue
-                except Exception:
-                    continue
-
-                # update rolling window
-                values.append(last_value)
-                if len(values) > window_size:
-                    values.pop(0)
-                if len(values) < window_size:
-                    # wait until window is full for reliable avg
-                    avg_value = float(sum(values) / len(values))
-                else:
-                    avg_value = float(sum(values) / len(values))
-
-                # slowly adapt baseline toward avg_value (very slow)
-                baseline = baseline * adapt_rate + avg_value * (1.0 - adapt_rate)
-                threshold = baseline + offset
-
-                # debug line (keeps console readable)
-                print(
-                    f"[ADC] raw:{last_value:.1f} avg:{avg_value:.1f} base:{baseline:.1f} thr:{threshold:.1f} press={pressing}")
-
-                # Decision: require window full to change pressing state (optional safety)
-                if len(values) >= window_size:
-                    if not pressing and avg_value > threshold:
-                        pressing = True
-                        print("🔵 PRESS detected — will move forward")
-                        # Only auto-takeoff if enabled; otherwise rely on manual T key
-                        if not self.send_rc_control and AUTO_TAKEOFF:
-                            try:
-                                print("Taking off (AUTO_TAKEOFF enabled)...")
-                                self.tello.takeoff()
-                                time.sleep(2)
-                                self.send_rc_control = True
-                            except Exception as e:
-                                print("Auto takeoff failed:", e)
-                        # set velocity variable (actual send happens in update())
-                        self.for_back_velocity = SPEED_VALUE
-
-                    elif pressing and avg_value < (threshold - hysteresis):
-                        pressing = False
-                        print("⚪ RELEASE detected — stop")
-                        self.for_back_velocity = 0
-
-            # loop end
-        except Exception as e:
-            print("Serial reader error:", e)
-        finally:
+        # Cleanup
+        try:
             if arduino and arduino.is_open:
                 arduino.close()
                 print("Serial port closed.")
+        except Exception:
+            pass
 
     # ---------------- UPDATE LOOP ---------------- #
     def update(self):
