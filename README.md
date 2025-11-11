@@ -10,11 +10,15 @@ Scrum og tidsstyring i [Trello](https://trello.com/invite/b/68c01f41dd1b2f23761f
 
 ## Sensorer
 Der er 8 i alt.
-- Fremad
-- Tilbage
-- Til højre
-- Til ventre
-- Drej til højre
-- Drej til venstre
-- Op
-- Ned
+
+| Sensor | Action                   | Tello axis            | Sign |
+| ------ | ------------------------ | --------------------- | ---- |
+| S0     | Forward                  | `for_back_velocity`   | +    |
+| S1     | Backward                 | `for_back_velocity`   | –    |
+| S2     | Move right               | `left_right_velocity` | +    |
+| S3     | Move left                | `left_right_velocity` | –    |
+| S4     | Turn right (rotate)      | `yaw_velocity`        | +    |
+| S5     | Turn left (rotate)       | `yaw_velocity`        | –    |
+| S6     | Up                       | `up_down_velocity`    | +    |
+| S7     | Down                     | `up_down_velocity`    | –    |
+| S8     | (optional future sensor) | —                     | —    |
